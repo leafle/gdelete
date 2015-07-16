@@ -86,6 +86,7 @@ end
 
 # Use the query string to announce how many emails will be deleted
 puts "Google's estimate is that #{fetch_more_messages.result_size_estimate} match this query."
+puts "Google's estimate is usually very wrong for large result sets."
 puts "Are you sure you want to delete all of these? 'y' to continue"
 exit 1 unless gets.strip == "y"
 
