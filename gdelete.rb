@@ -20,6 +20,7 @@ OptionParser.new do |opts|
   opts.on('-f', '--no-from', 'Allow no from filter') { $options[:no_from] = true }
   opts.on('-b', '--no-before', 'Allow no before filter') { $options[:no_before] = true }
   opts.on('-t', '--timers', 'Display timing information') { $options[:timers] = true }
+  opts.on('-i', '--no-batch', 'Send delete requests individually') { $options[:no_batch] = true }
 
 end.parse!
 
@@ -60,7 +61,7 @@ $client = Google::APIClient.new(:application_name => APPLICATION_NAME)
 $client.authorization = authorize
 $gmail_api = $client.discovered_api('gmail', 'v1')
 
-$total_fetch_time = 0
+$total_fetch_time, $total_deleted, $total_delete_time = 0, 0, 0
 def fetch_more_messages
   results, t = nil, 0
   t = Benchmark.realtime do
@@ -78,6 +79,39 @@ def fetch_more_messages
   puts "Fetch took #{t.round(2)}.  Total time in fetches #{$total_fetch_time.round(2)}" if $options[:timers]
   $next_page_token = results.data.next_page_token
   results.data
+end
+
+def individual_deletes(fetched_messages)
+  fetched_messages.each do |m|
+    result = nil
+    t = Benchmark.realtime { result = $client.execute!(:api_method => $gmail_api.users.messages.trash, :parameters => { :userId => 'me', :id => m.id }) }
+    if result.status == 200
+      $total_deleted += 1
+      $total_delete_time += t
+      puts "Delete completed in: #{t.round(2)} seconds" if $options[:timers]
+    else
+      puts "#{result.request.parameters} => #{result.status}"
+    end
+  end
+end
+
+def batched_deletes(fetched_messages)
+  until fetched_messages.empty?
+    batch = Google::APIClient::BatchRequest.new() do |result|
+      if result.status == 200
+        $total_deleted += 1
+      else
+        puts "#{result.request.parameters} => #{result.status}"
+      end
+    end
+
+    fetched_messages.shift(15).each do |m|
+      batch.add(:api_method => $gmail_api.users.messages.trash, :parameters => { :userId => 'me', :id => m.id })
+    end
+    t = Benchmark.realtime { $client.execute!(batch) }
+    $total_delete_time += t
+    puts "Batch delete completed in: #{t.round(2)} seconds" if $options[:timers]
+  end
 end
 
 # Make sure the query string contains a from filter unless --no-from
@@ -98,29 +132,13 @@ puts "Google's estimate is usually very wrong for large result sets."
 puts "Are you sure you want to delete all of these? 'y' to continue"
 exit 1 unless gets.strip == "y"
 
-total_deleted, total_delete_time = 0, 0
 until (fetched_messages = fetch_more_messages.messages).empty?
-  # delete in batches of 1000 (limit of requests in a batch)
-  until fetched_messages.empty?
-    batch = Google::APIClient::BatchRequest.new() do |result|
-      if result.status == 200
-        total_deleted += 1
-      else
-        puts "#{result.request.parameters} => #{result.status}"
-      end
-    end
+  # delete in batches of 100 (limit of requests in a batch)
+  $options[:no_batch] ? individual_deletes(fetched_messages) : batched_deletes(fetched_messages)
 
-    batched_request_count = 0
-    fetched_messages.shift(15).each do |m|
-      batch.add(:api_method => $gmail_api.users.messages.trash, :parameters => { :userId => 'me', :id => m.id })
-      batched_request_count += 1
-    end
-    t = Benchmark.realtime { $client.execute!(batch) }
-    total_delete_time += t
-    puts "Total deleted #{total_deleted}"
-    if $options[:timers]
-      puts "Delete batch completed in: #{t.round(2)} seconds.  Total time in delete requests: #{total_delete_time.round(2)} seconds."
-    end
+  puts "Total deleted #{$total_deleted}"
+  if $options[:timers]
+    puts "Total time in delete requests: #{$total_delete_time.round(2)} seconds"
   end
 end
 
