@@ -5,6 +5,7 @@ require 'google/api_client/auth/storage'
 require 'google/api_client/auth/storages/file_store'
 require 'fileutils'
 require 'optparse'
+require 'benchmark'
 
 trap "SIGINT" do
   puts "Exiting"
@@ -18,6 +19,7 @@ OptionParser.new do |opts|
   opts.on('-q', '--query QUERY', 'Query string') { |v| $options[:query] = v }
   opts.on('-f', '--no-from', 'Allow no from filter') { $options[:no_from] = true }
   opts.on('-b', '--no-before', 'Allow no before filter') { $options[:no_before] = true }
+  opts.on('-t', '--timers', 'Display timing information') { $options[:timers] = true }
 
 end.parse!
 
@@ -58,16 +60,22 @@ $client = Google::APIClient.new(:application_name => APPLICATION_NAME)
 $client.authorization = authorize
 $gmail_api = $client.discovered_api('gmail', 'v1')
 
+$total_fetch_time = 0
 def fetch_more_messages
-  results = $client.execute!(
-    :api_method => $gmail_api.users.messages.list,
-    :parameters => { :userId => 'me',
-                     :q => $options[:query],
-                     :maxResults => 100,
-                     :pageToken => $next_page_token,
-                     :fields => "messages/id,nextPageToken,resultSizeEstimate" }
-  )
+  results, t = nil, 0
+  t = Benchmark.realtime do
+    results = $client.execute!(
+      :api_method => $gmail_api.users.messages.list,
+      :parameters => { :userId => 'me',
+                       :q => $options[:query],
+                       :maxResults => 100,
+                       :pageToken => $next_page_token,
+                       :fields => "messages/id,nextPageToken,resultSizeEstimate" }
+    )
+  end
   puts "Fetching messages to delete.  Params: #{results.request.parameters}"
+  $total_fetch_time += t
+  puts "Fetch took #{t.round(2)}.  Total time in fetches #{$total_fetch_time.round(2)}" if $options[:timers]
   $next_page_token = results.data.next_page_token
   results.data
 end
@@ -90,7 +98,7 @@ puts "Google's estimate is usually very wrong for large result sets."
 puts "Are you sure you want to delete all of these? 'y' to continue"
 exit 1 unless gets.strip == "y"
 
-total_deleted = 0
+total_deleted, total_delete_time = 0, 0
 until (fetched_messages = fetch_more_messages.messages).empty?
   # delete in batches of 1000 (limit of requests in a batch)
   until fetched_messages.empty?
@@ -107,8 +115,12 @@ until (fetched_messages = fetch_more_messages.messages).empty?
       batch.add(:api_method => $gmail_api.users.messages.trash, :parameters => { :userId => 'me', :id => m.id })
       batched_request_count += 1
     end
-    $client.execute!(batch)
+    t = Benchmark.realtime { $client.execute!(batch) }
+    total_delete_time += t
     puts "Total deleted #{total_deleted}"
+    if $options[:timers]
+      puts "Delete batch completed in: #{t.round(2)} seconds.  Total time in delete requests: #{total_delete_time.round(2)} seconds."
+    end
   end
 end
 
